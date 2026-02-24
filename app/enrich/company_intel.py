@@ -31,17 +31,30 @@ class CompanyIntelligence:
         }
     
     def _fetch_page(self, url: str) -> Optional[str]:
-        """Fetch page content."""
+        """Fetch page content with SSL fallback."""
         try:
             response = self.session.get(
                 url,
                 headers=self._get_headers(),
                 timeout=self.timeout,
-                allow_redirects=True,
-                verify=False
+                allow_redirects=True
             )
             response.raise_for_status()
             return response.text
+        except requests.exceptions.SSLError:
+            try:
+                response = self.session.get(
+                    url,
+                    headers=self._get_headers(),
+                    timeout=self.timeout,
+                    allow_redirects=True,
+                    verify=False
+                )
+                response.raise_for_status()
+                return response.text
+            except Exception as e:
+                logger.debug(f"Failed to fetch {url} (no verify): {e}")
+                return None
         except Exception as e:
             logger.debug(f"Failed to fetch {url}: {e}")
             return None
@@ -62,7 +75,7 @@ class CompanyIntelligence:
         
         # Count team members on page (rough heuristic)
         # Look for patterns like "John - Manager", "Sarah - Designer"
-        name_patterns = r'[A-Z][a-z]+ [A-Z][a-z]+\s*[-–—]\s*[A-Za-z ]+'
+        name_patterns = r'[A-ZÀ-ÖØ-Þ\u0100-\u017E][a-zà-öø-ÿ\u0101-\u017F]+\s+[A-ZÀ-ÖØ-Þ\u0100-\u017E][a-zà-öø-ÿ\u0101-\u017F]+\s*[-–—]\s*[A-Za-zÀ-ÖØ-öø-ÿ\u0100-\u017F ]+'
         matches = len(re.findall(name_patterns, text))
         
         if matches >= 50:
@@ -100,11 +113,39 @@ class CompanyIntelligence:
         copyright_patterns = [
             r'©\s*(\d{4})',
             r'Copyright\s+(\d{4})',
-            r'Founded\s+(\d{4})',
-            r'Gegründet\s+(\d{4})',  # German
-            r'Fondée\s+(\d{4})',  # French
+            # English
+            r'Founded\s+(?:in\s+)?(\d{4})',
+            r'Established\s+(?:in\s+)?(\d{4})',
             r'Est\.\s+(\d{4})',
-            r'Established\s+(\d{4})',
+            r'Since\s+(\d{4})',
+            # German
+            r'Gegründet\s+(?:im\s+)?(\d{4})',
+            r'Seit\s+(\d{4})',
+            r'Gründung(?:sjahr)?\s*:?\s*(\d{4})',
+            # French
+            r'Fondée?\s+(?:en\s+)?(\d{4})',
+            r'Depuis\s+(\d{4})',
+            r'Créée?\s+(?:en\s+)?(\d{4})',
+            # Italian
+            r'Fondata?\s+(?:nel\s+)?(\d{4})',
+            r'Dal\s+(\d{4})',
+            # Spanish
+            r'Fundada?\s+(?:en\s+)?(\d{4})',
+            r'Desde\s+(\d{4})',
+            # Portuguese
+            r'Fundada?\s+(?:em\s+)?(\d{4})',
+            r'Desde\s+(\d{4})',
+            # Dutch
+            r'Opgericht\s+(?:in\s+)?(\d{4})',
+            r'Sinds\s+(\d{4})',
+            # Polish
+            r'Założona?\s+(?:w\s+)?(\d{4})',
+            r'Od\s+(\d{4})\s+roku',
+            # Scandinavian
+            r'Grundad\s+(\d{4})',       # Swedish
+            r'Grunnlagt\s+(\d{4})',     # Norwegian
+            r'Grundlagt\s+(\d{4})',     # Danish
+            r'Perustettu\s+(\d{4})',    # Finnish
         ]
         
         years = []
@@ -145,25 +186,77 @@ class CompanyIntelligence:
             if lang and len(lang) == 2:
                 return lang
         
-        # Fallback: detect from text content using simple keyword matching
+        # Fallback: detect from text content using keyword matching
         text = soup.get_text().lower()
         
-        # German indicators
-        if any(word in text for word in ['willkommen', 'ü', 'ö', 'ä', 'telefon', 'adresse', 'kontakt']):
-            if text.count('ä') + text.count('ö') + text.count('ü') > 10:
-                return 'DE'
+        # Language detection rules - ordered by specificity
+        # Each entry: (language_code, distinctive_words, min_matches)
+        language_rules = [
+            # German - distinctive umlauts and words
+            ('DE', ['willkommen', 'impressum', 'datenschutz', 'geschäftsbedingungen', 'öffnungszeiten',
+                     'angebote', 'unternehmen', 'startseite', 'leistungen'], 2),
+            # French - distinctive accents and words
+            ('FR', ['bienvenue', 'mentions légales', 'politique de confidentialité', 'accueil',
+                     'entreprise', 'nos services', 'à propos', 'contactez-nous'], 2),
+            # Italian - distinctive words
+            ('IT', ['benvenuto', 'benvenuti', 'chi siamo', 'azienda', 'servizi',
+                     'contatti', 'note legali', 'privacy', 'prodotti'], 2),
+            # Spanish - distinctive words
+            ('ES', ['bienvenido', 'bienvenidos', 'quiénes somos', 'empresa', 'servicios',
+                     'aviso legal', 'política de privacidad', 'inicio', 'nosotros'], 2),
+            # Portuguese - distinctive words
+            ('PT', ['bem-vindo', 'bem-vindos', 'quem somos', 'empresa', 'serviços',
+                     'avisos legais', 'política de privacidade', 'início'], 2),
+            # Dutch - distinctive words
+            ('NL', ['welkom', 'over ons', 'diensten', 'privacybeleid', 'algemene voorwaarden',
+                     'producten', 'bedrijf', 'thuispagina', 'openingstijden'], 2),
+            # Polish - distinctive characters and words
+            ('PL', ['witamy', 'o nas', 'usługi', 'polityka prywatności', 'regulamin',
+                     'produkty', 'kontakt', 'strona główna', 'oferta'], 2),
+            # Romanian
+            ('RO', ['bine ați venit', 'despre noi', 'servicii', 'produse',
+                     'politica de confidențialitate', 'termeni și condiții'], 2),
+            # Czech
+            ('CS', ['vítejte', 'o nás', 'služby', 'produkty', 'ochrana osobních údajů',
+                     'obchodní podmínky', 'úvod', 'kontakt'], 2),
+            # Hungarian
+            ('HU', ['üdvözöljük', 'rólunk', 'szolgáltatások', 'termékek',
+                     'adatvédelmi irányelvek', 'kapcsolat', 'főoldal'], 2),
+            # Swedish
+            ('SV', ['välkommen', 'om oss', 'tjänster', 'produkter', 'integritetspolicy',
+                     'villkor', 'startsida', 'kontakta oss'], 2),
+            # Danish
+            ('DA', ['velkommen', 'om os', 'tjenester', 'produkter', 'privatlivspolitik',
+                     'betingelser', 'forside', 'kontakt'], 2),
+            # Norwegian
+            ('NO', ['velkommen', 'om oss', 'tjenester', 'produkter', 'personvern',
+                     'vilkår', 'forside', 'kontakt oss'], 2),
+            # Finnish
+            ('FI', ['tervetuloa', 'meistä', 'palvelut', 'tuotteet', 'tietosuoja',
+                     'ehdot', 'etusivu', 'yhteystiedot'], 2),
+            # Greek
+            ('EL', ['καλώς ήρθατε', 'σχετικά', 'υπηρεσίες', 'επικοινωνία',
+                     'πολιτική απορρήτου', 'προϊόντα'], 2),
+            # Bulgarian
+            ('BG', ['добре дошли', 'за нас', 'услуги', 'продукти',
+                     'политика за поверителност', 'контакт'], 2),
+            # Croatian
+            ('HR', ['dobrodošli', 'o nama', 'usluge', 'proizvodi',
+                     'pravila privatnosti', 'kontakt'], 2),
+            # English (last - most common fallback)
+            ('EN', ['welcome', 'about us', 'services', 'products', 'privacy policy',
+                     'terms', 'contact us', 'home'], 2),
+        ]
         
-        # French indicators
-        if any(word in text for word in ['bienvenue', 'français', 'contactez', 'téléphone']):
-            return 'FR'
+        for lang_code, keywords, min_matches in language_rules:
+            matches = sum(1 for kw in keywords if kw in text)
+            if matches >= min_matches:
+                return lang_code
         
-        # Italian indicators
-        if any(word in text for word in ['benvenuto', 'italiano', 'contatti', 'telefono']):
-            return 'IT'
-        
-        # English (default if Western content)
-        if any(word in text for word in ['welcome', 'contact', 'about', 'team']):
-            return 'EN'
+        # Additional heuristic: check for German umlauts
+        umlaut_count = text.count('ä') + text.count('ö') + text.count('ü') + text.count('ß')
+        if umlaut_count > 10:
+            return 'DE'
         
         return None
     

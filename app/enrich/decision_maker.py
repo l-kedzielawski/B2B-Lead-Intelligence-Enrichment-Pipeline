@@ -39,7 +39,7 @@ class DecisionMakerFinder:
         }
     
     def _fetch_page(self, url: str) -> Optional[str]:
-        """Fetch page content."""
+        """Fetch page content with SSL fallback."""
         try:
             response = self.session.get(
                 url,
@@ -49,6 +49,20 @@ class DecisionMakerFinder:
             )
             response.raise_for_status()
             return response.text
+        except requests.exceptions.SSLError:
+            try:
+                response = self.session.get(
+                    url,
+                    headers=self._get_headers(),
+                    timeout=self.timeout,
+                    allow_redirects=True,
+                    verify=False
+                )
+                response.raise_for_status()
+                return response.text
+            except Exception as e:
+                logger.debug(f"Failed to fetch {url} (no verify): {e}")
+                return None
         except Exception as e:
             logger.debug(f"Failed to fetch {url}: {e}")
             return None
@@ -71,26 +85,78 @@ class DecisionMakerFinder:
         
         # Common title patterns
         title_keywords = [
-            'owner', 'founder', 'ceo', 'manager', 'director',
-            'inhaber', 'gründer', 'leiter', 'geschäftsführer',  # German
-            'propriétaire', 'fondateur', 'directeur',  # French
+            # English
+            'owner', 'founder', 'co-founder', 'ceo', 'manager', 'director',
+            'managing director', 'general manager', 'president', 'principal',
+            # Food industry specific (EN)
+            'head chef', 'executive chef', 'pastry chef', 'head baker',
+            'purchasing manager', 'procurement manager', 'buyer',
+            # German
+            'inhaber', 'inhaberin', 'gründer', 'gründerin', 'geschäftsführer', 'geschäftsführerin',
+            'leiter', 'leiterin', 'direktor', 'direktorin', 'vorstand',
+            'chefkonditor', 'chefkonditorin', 'küchenchef', 'einkaufsleiter', 'einkaufsleiterin',
+            'bäckermeister', 'bäckermeisterin', 'konditormeister', 'konditormeisterin',
+            # French
+            'propriétaire', 'fondateur', 'fondatrice', 'directeur', 'directrice',
+            'gérant', 'gérante', 'président', 'présidente', 'pdg',
+            'chef pâtissier', 'chef cuisinier', 'responsable achats', 'maître boulanger',
+            # Italian
+            'proprietario', 'proprietaria', 'fondatore', 'fondatrice',
+            'direttore', 'direttrice', 'amministratore delegato',
+            'titolare', 'responsabile', 'responsabile acquisti',
+            'chef pasticcere', 'capo cuoco', 'maestro pasticcere',
+            # Spanish
+            'propietario', 'propietaria', 'fundador', 'fundadora',
+            'director', 'directora', 'gerente', 'presidente', 'presidenta',
+            'jefe de cocina', 'jefe de compras', 'maestro pastelero',
+            # Portuguese
+            'proprietário', 'proprietária', 'fundador', 'fundadora',
+            'diretor', 'diretora', 'gerente', 'presidente',
+            'chefe de cozinha', 'responsável de compras',
+            # Dutch
+            'eigenaar', 'eigenares', 'oprichter', 'oprichtster',
+            'directeur', 'bestuurder', 'hoofd inkoop', 'inkoopmanager',
+            'meester bakker', 'chef-kok', 'patissier',
+            # Polish
+            'właściciel', 'właścicielka', 'założyciel', 'założycielka',
+            'dyrektor', 'kierownik', 'prezes', 'szef kuchni',
+            'kierownik zakupów', 'mistrz cukierniczy',
+            # Cosmetology / Beauty
+            'spa manager', 'beauty director', 'spa-leiterin', 'kosmetikerin',
+            'directrice beauté', 'direttore spa',
+            # HoReCa
+            'hoteldirektor', 'food and beverage manager', 'f&b manager',
+            'directeur hôtelier', 'direttore albergo',
+            # Scandinavian
+            'ägare', 'grundare', 'vd', 'verkställande direktör',  # Swedish
+            'eier', 'grunnlegger', 'daglig leder',  # Norwegian
+            'ejer', 'stifter', 'direktør',  # Danish
         ]
         
         # Pattern: "Name - Title" or "Name, Title"
+        # Unicode-aware name pattern supporting European diacritics
+        # Matches: "Hans Müller", "François Dupont", "Jan van der Berg", "Maria da Silva"
+        _name = r'[A-ZÀ-ÖØ-Þ\u0100-\u017E][a-zà-öø-ÿ\u0101-\u017F]+(?:\s+(?:von|van|de|da|di|del|der|den|het|la|le|los|das|dos)\s+)?[A-ZÀ-ÖØ-Þ\u0100-\u017E][a-zà-öø-ÿ\u0101-\u017F]+'
+        _titles = '|'.join(title_keywords)
         patterns = [
-            r'([A-Z][a-z]+ [A-Z][a-z]+)\s*[-–—]\s*(owner|founder|ceo|manager|director|inhaber|gründer|geschäftsführer)',
-            r'([A-Z][a-z]+ [A-Z][a-z]+),\s*(owner|founder|ceo|manager|director|inhaber|gründer|geschäftsführer)',
+            rf'({_name})\s*[-–—]\s*({_titles})',
+            rf'({_name}),\s*({_titles})',
+            rf'({_titles})\s*[-–—:]\s*({_name})',  # Reversed: "Inhaber: Hans Müller"
         ]
         
         found_names = set()
         for line in lines:
             line = line.strip()
-            if len(line) > 10 and len(line) < 100:
-                for pattern in patterns:
+            if len(line) > 5 and len(line) < 200:
+                for i, pattern in enumerate(patterns):
                     matches = re.finditer(pattern, line, re.IGNORECASE)
                     for match in matches:
-                        name = match.group(1).strip()
-                        title = match.group(2).strip().lower()
+                        if i < 2:  # Normal order: name - title
+                            name = match.group(1).strip()
+                            title = match.group(2).strip().lower()
+                        else:  # Reversed: title - name
+                            title = match.group(1).strip().lower()
+                            name = match.group(2).strip()
                         if name not in found_names:
                             found_names.add(name)
                             people.append((name, title))
@@ -172,12 +238,23 @@ class DecisionMakerFinder:
         
         # Try about page first (most likely to have owner info)
         about_urls = [
-            f'{url}/about',
-            f'{url}/about-us',
-            f'{url}/team',
-            f'{url}/leadership',
-            f'{url}/uber-uns',  # German
-            f'{url}/a-propos',  # French
+            f'{url}/about',          # EN
+            f'{url}/about-us',       # EN
+            f'{url}/team',           # EN/universal
+            f'{url}/leadership',     # EN
+            f'{url}/uber-uns',       # DE
+            f'{url}/ueber-uns',      # DE (alternative)
+            f'{url}/impressum',      # DE/AT/CH (legal - GOLDMINE)
+            f'{url}/kontakt',        # DE
+            f'{url}/a-propos',       # FR
+            f'{url}/mentions-legales', # FR (legal)
+            f'{url}/chi-siamo',      # IT
+            f'{url}/note-legali',    # IT (legal)
+            f'{url}/sobre-nosotros', # ES
+            f'{url}/aviso-legal',    # ES (legal)
+            f'{url}/over-ons',       # NL
+            f'{url}/o-nas',          # PL
+            f'{url}/sobre-nos',      # PT
         ]
         
         result = None
@@ -189,7 +266,16 @@ class DecisionMakerFinder:
                 if names_titles:
                     logger.debug(f"Found {len(names_titles)} people on {about_url}")
                     # Take first person found - likely to be owner/decision maker
-                    if 'owner' in names_titles[0][1].lower() or 'founder' in names_titles[0][1].lower() or 'geschäftsführer' in names_titles[0][1].lower():
+                    high_conf_titles = [
+                        'owner', 'founder', 'inhaber', 'inhaberin', 'geschäftsführer', 'geschäftsführerin',
+                        'gründer', 'gründerin', 'propriétaire', 'fondateur', 'fondatrice',
+                        'proprietario', 'proprietaria', 'fondatore', 'titolare',
+                        'propietario', 'propietaria', 'fundador', 'fundadora',
+                        'proprietário', 'proprietária', 'eigenaar', 'oprichter',
+                        'właściciel', 'właścicielka', 'założyciel',
+                        'ägare', 'grundare', 'eier', 'grunnlegger', 'ejer', 'stifter',
+                    ]
+                    if any(t in names_titles[0][1].lower() for t in high_conf_titles):
                         result = Person(
                             name=names_titles[0][0],
                             title=names_titles[0][1],

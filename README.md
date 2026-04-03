@@ -240,5 +240,5 @@ pytest tests/ -v
 
 ## Contact
 
-https://kedzielawski.com 
-lukasz@kedzielawski.com
+Lukasz Kedzielawski
+l.kedzielawski@gmail.com
